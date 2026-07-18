@@ -7,9 +7,9 @@ import uuid
 from datetime import datetime, timedelta
 
 # ================= कॉन्फ़िगरेशन =================
-BOT_TOKEN = "अपना_बोट_टोकन_यहाँ_डालें"
-MONGO_URI = "अपना_MONGODB_URI_यहाँ_डालें"
-OWNER_ID = 123456789  # अपनी टेलीग्राम यूजर आईडी यहाँ डालें (नंबर में)
+BOT_TOKEN = "8740636028:AAFKOpliANI816prOplKF1FB9qxF7TkKoG8"
+MONGO_URI = ""
+OWNER_ID = 8702240402# अपनी टेलीग्राम यूजर आईडी यहाँ डालें (नंबर में)
 
 bot = telebot.TeleBot(BOT_TOKEN)
 

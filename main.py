@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 
 # ================= कॉन्फ़िगरेशन =================
 BOT_TOKEN = "8740636028:AAFKOpliANI816prOplKF1FB9qxF7TkKoG8"
-MONGO_URI = ""
+MONGO_URI = "mongodb+srv://Tejas7xx:mrxtejas7@cluster0.akhlgjf.mongodb.net/?appName=Cluster0"
 OWNER_ID = 8702240402# अपनी टेलीग्राम यूजर आईडी यहाँ डालें (नंबर में)
 
 bot = telebot.TeleBot(BOT_TOKEN)

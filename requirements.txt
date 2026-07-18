@@ -1,0 +1,4 @@
+pyTelegramBotAPI==4.15.4
+pymongo==4.6.2
+qrcode==7.4.2
+pillow==10.2.0

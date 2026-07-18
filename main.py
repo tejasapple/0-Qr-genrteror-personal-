@@ -5,7 +5,7 @@ import qrcode
 import io
 import uuid
 from datetime import datetime, timedelta
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 import csv
 import os
 from bson.objectid import ObjectId
@@ -13,7 +13,7 @@ from bson.objectid import ObjectId
 # ================= कॉन्फ़िगरेशन =================
 BOT_TOKEN = "8740636028:AAFKOpliANI816prOplKF1FB9qxF7TkKoG8"
 MONGO_URI = "mongodb+srv://Tejas7xx:mrxtejas7@cluster0.akhlgjf.mongodb.net/?appName=Cluster0"
-OWNER_ID = 8702240402 # अपनी टेलीग्राम यूजर आईडी यहाँ डालें (नंबर में)
+OWNER_ID = 8702240402 # अपनी टेलीग्राम यूजर आईडी यहाँ डालें
 
 LOG_GROUP_ID = OWNER_ID 
 
@@ -23,20 +23,21 @@ bot = telebot.TeleBot(BOT_TOKEN)
 client = pymongo.MongoClient(MONGO_URI)
 db = client['upi_master_bot']
 
-# Collections (Tables)
 upi_col = db['upi_ids']        
 admins_col = db['admins']      
 tx_col = db['transactions']    
 saved_qrs_col = db['saved_qrs']
 
-# Owner को डिफ़ॉल्ट एडमिन बनाना (Regular)
+# Owner को डिफ़ॉल्ट एडमिन बनाना
 if not admins_col.find_one({"user_id": OWNER_ID}):
     admins_col.insert_one({
         "user_id": OWNER_ID, 
         "name": "Owner", 
-        "use_tr": True, 
-        "is_sharing": False, 
-        "last_cleared": datetime.now()
+        "is_sharing": False,
+        "primary_id": OWNER_ID,
+        "last_cleared": datetime.now(),
+        "advance_received": 0,
+        "last_claimed_amount": 0
     })
 
 # ================= हेल्पर फंक्शन्स =================
@@ -51,51 +52,32 @@ def get_next_upi(group):
         upi_col.update_one({"_id": upi["_id"]}, {"$set": {"last_used": datetime.now()}})
     return upi
 
-def generate_qr_image(upi_id, name, amount, tx_id, logo_file_id=None, use_tr=True):
-    # 'tn' पैरामीटर टाइप किए हुए मैसेज (Note) के लिए होता है
-    if use_tr:
-        upi_url = f"upi://pay?pa={upi_id}&pn={name}&am={amount}&tr={tx_id}&tn={tx_id}"
-    else:
-        upi_url = f"upi://pay?pa={upi_id}&pn={name}&am={amount}"
+def generate_qr_image(upi_id, name, amount, tx_id):
+    # क्लीन QR जेनरेट करना (कोई टेक्स्ट या लोगो नहीं)
+    upi_url = f"upi://pay?pa={upi_id}&pn={name}&am={amount}&tr={tx_id}&tn={tx_id}"
         
     qr = qrcode.QRCode(version=1, error_correction=qrcode.constants.ERROR_CORRECT_H, box_size=10, border=4)
     qr.add_data(upi_url)
     qr.make(fit=True)
+    
+    # ब्लैक & व्हाइट क्लीन QR
     img = qr.make_image(fill_color='black', back_color='white').convert('RGB')
     
-    w, h = img.size
-    banner_height = 60
-    new_img = Image.new('RGB', (w, h + banner_height), 'white')
-    new_img.paste(img, (0, 0))
-    
-    draw = ImageDraw.Draw(new_img)
-    display_text = f"TXN: {tx_id}" if use_tr else f"Amount: {amount} (No TXN ID)"
-    draw.text((15, h + 20), display_text, fill="black")
-    
-    if logo_file_id:
-        try:
-            file_info = bot.get_file(logo_file_id)
-            downloaded_file = bot.download_file(file_info.file_path)
-            logo = Image.open(io.BytesIO(downloaded_file)).convert("RGBA")
-            logo.thumbnail((50, 50))
-            new_img.paste(logo, (w - 60, h + 5), logo)
-        except Exception as e:
-            print(f"Logo error: {e}")
-            
     bio = io.BytesIO()
-    new_img.save(bio, 'PNG')
+    img.save(bio, 'PNG')
     bio.seek(0)
     return bio
 
 # ================= मेन्यू और कीबोर्ड्स =================
 
-def main_menu():
+def main_menu(user_id):
     markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(
-        KeyboardButton("💸 Generate QR"), KeyboardButton("🖼 My Saved QRs"),
-        KeyboardButton("📊 Status/Stats"), KeyboardButton("🛠 My Settings")
+        KeyboardButton("💸 Generate QR"), KeyboardButton("🖼 My Saved QRs")
     )
-    markup.add(KeyboardButton("⚙️ Admin Panel"))
+    markup.add(KeyboardButton("📊 Status/Stats"))
+    if user_id == OWNER_ID:
+        markup.add(KeyboardButton("⚙️ Admin Panel"))
     return markup
 
 # ================= मुख्य कमांड्स =================
@@ -105,7 +87,7 @@ def start_cmd(message):
     if not is_admin(message.from_user.id):
         bot.reply_to(message, "🚫 आप इस बोट को इस्तेमाल करने के लिए ऑथराइज्ड नहीं हैं।")
         return
-    bot.send_message(message.chat.id, "🤖 Welcome to Master UPI Bot!\nसिस्टम रेडी है।", reply_markup=main_menu())
+    bot.send_message(message.chat.id, "🤖 Welcome to Master UPI Bot!\nसिस्टम रेडी है।", reply_markup=main_menu(message.from_user.id))
 
 @bot.message_handler(commands=['export'])
 def export_data(message):
@@ -175,12 +157,8 @@ def create_and_send_qr(message, amount, group, admin_id):
         bot.send_message(message.chat.id, f"❌ {group} ग्रुप में कोई UPI ID नहीं मिली!")
         return
         
-    admin_data = admins_col.find_one({"user_id": admin_id})
-    use_tr = admin_data.get("use_tr", True)
-    logo_file_id = admin_data.get("logo_id", None)
-        
     tx_id = "TXN" + str(uuid.uuid4().hex)[:10].upper()
-    qr_img = generate_qr_image(upi['upi_id'], upi['name'], amount, tx_id, logo_file_id, use_tr)
+    qr_img = generate_qr_image(upi['upi_id'], upi['name'], amount, tx_id)
     
     tx_col.insert_one({
         "tx_id": tx_id, "amount": amount, "group": group, "upi_id": upi['upi_id'], 
@@ -234,7 +212,7 @@ def handle_tx_action(call):
         bot.delete_message(call.message.chat.id, call.message.message_id)
         create_and_send_qr(call.message, tx['amount'], tx['group'], call.from_user.id)
 
-# ================= 2. My Saved QRs (पर्सनल क्यूआर) =================
+# ================= 2. My Saved QRs =================
 
 @bot.message_handler(func=lambda msg: msg.text == "🖼 My Saved QRs")
 def my_qrs_menu(message):
@@ -253,7 +231,7 @@ def saved_add_step1(call):
 
 def saved_add_step2(message):
     if not message.photo:
-        return bot.send_message(message.chat.id, "❌ आपने फोटो नहीं भेजी। प्रक्रिया रद्द कर दी गई।")
+        return bot.send_message(message.chat.id, "❌ आपने फोटो नहीं भेजी।")
     photo_id = message.photo[-1].file_id
     msg = bot.send_message(message.chat.id, "📝 इस QR को किस नाम से सेव करना है? (Ex: Shabnam):")
     bot.register_next_step_handler(msg, saved_add_step3, photo_id)
@@ -296,122 +274,100 @@ def saved_show_specific(call):
         bot.answer_callback_query(call.id, "QR not found!")
 
 
-# ================= 3. माय सेटिंग्स (Logo & TXN ID Toggle) =================
-
-@bot.message_handler(func=lambda msg: msg.text == "🛠 My Settings")
-def my_settings(message):
-    admin_id = message.from_user.id
-    if not is_admin(admin_id): return
-    
-    admin_data = admins_col.find_one({"user_id": admin_id})
-    use_tr = admin_data.get("use_tr", True)
-    status_text = "ON 🟢" if use_tr else "OFF 🔴"
-    
-    markup = InlineKeyboardMarkup(row_width=1)
-    markup.add(
-        InlineKeyboardButton(f"🔄 Pre-filled Message / TXN (Current: {status_text})", callback_data="set_toggle_tr"),
-        InlineKeyboardButton("🖼 Upload Custom Logo", callback_data="set_logo"),
-        InlineKeyboardButton("🗑 Remove Logo", callback_data="set_rm_logo")
-    )
-    bot.send_message(message.chat.id, "🛠 **अपनी पर्सनल सेटिंग्स चुनें:**", reply_markup=markup, parse_mode="Markdown")
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("set_"))
-def handle_settings(call):
-    admin_id = call.from_user.id
-    action = call.data
-    
-    if action == "set_toggle_tr":
-        admin_data = admins_col.find_one({"user_id": admin_id})
-        new_status = not admin_data.get("use_tr", True)
-        admins_col.update_one({"user_id": admin_id}, {"$set": {"use_tr": new_status}})
-        bot.answer_callback_query(call.id, "✅ TXN/Message Prefill Status Updated!")
-        bot.delete_message(call.message.chat.id, call.message.message_id)
-        my_settings(call.message) 
-        
-    elif action == "set_logo":
-        msg = bot.send_message(call.message.chat.id, "कृपया अपना लोगो (Photo) भेजें।\n(नॉर्मल फोटो की तरह भेजें, डॉक्यूमेंट नहीं):")
-        bot.register_next_step_handler(msg, process_new_logo)
-        
-    elif action == "set_rm_logo":
-        admins_col.update_one({"user_id": admin_id}, {"$unset": {"logo_id": ""}})
-        bot.answer_callback_query(call.id, "✅ Logo Removed!", show_alert=True)
-
-def process_new_logo(message):
-    if not message.photo:
-        return bot.send_message(message.chat.id, "❌ आपने फोटो नहीं भेजी।")
-    logo_id = message.photo[-1].file_id
-    admins_col.update_one({"user_id": message.from_user.id}, {"$set": {"logo_id": logo_id}})
-    bot.send_message(message.chat.id, "✅ आपका कस्टम लोगो सेव हो गया है!")
-
-
-# ================= 4. स्टेटस और एनालिटिक्स (पार्टनर शेयरिंग के साथ) =================
+# ================= 3. स्टेटस और एनालिटिक्स (New Custom Dashboard) =================
 
 @bot.message_handler(func=lambda msg: msg.text == "📊 Status/Stats")
 def show_stats_menu(message):
     user_id = message.from_user.id
     if not is_admin(user_id): return
     
-    markup = InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        InlineKeyboardButton("Today", callback_data="stat_today_self"),
-        InlineKeyboardButton("Yesterday", callback_data="stat_yesterday_self"),
-        InlineKeyboardButton("Last 3 Days", callback_data="stat_3d_self"),
-        InlineKeyboardButton("Last 7 Days", callback_data="stat_7d_self"),
-        InlineKeyboardButton("This Month", callback_data="stat_month_self"),
-        InlineKeyboardButton("Total All", callback_data="stat_all_self")
-    )
-    
+    # अगर ओनर है, तो उसे ग्लोबल मेन्यू दिखाएं
     if user_id == OWNER_ID:
-        markup.add(InlineKeyboardButton("👑 Owner View: ALL Admins Data 👑", callback_data="stat_owner_menu"))
+        markup = InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            InlineKeyboardButton("Today (All)", callback_data="stat_today_all"),
+            InlineKeyboardButton("Yesterday (All)", callback_data="stat_yesterday_all"),
+            InlineKeyboardButton("This Month (All)", callback_data="stat_month_all"),
+            InlineKeyboardButton("Total (All)", callback_data="stat_all_all")
+        )
+        bot.send_message(message.chat.id, "👑 **Owner Global Stats View:**", reply_markup=markup, parse_mode="Markdown")
+    else:
+        # अगर पार्टनर/एडमिन है, तो सीधा उसका कैलकुलेटर बोर्ड दिखाएं
+        send_partner_dashboard(message.chat.id, user_id)
+
+def send_partner_dashboard(chat_id, user_id):
+    admin_data = admins_col.find_one({"user_id": user_id})
+    primary_id = admin_data.get("primary_id", user_id)
+    p_admin = admins_col.find_one({"user_id": primary_id})
+    
+    # सभी लिंक्ड आईडी खोजें
+    linked_admins = admins_col.find({"primary_id": primary_id})
+    p_ids = [a["user_id"] for a in linked_admins]
+    if primary_id not in p_ids: p_ids.append(primary_id)
+    
+    now = datetime.now()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    
+    # 1. Today Stats
+    today_txns = list(tx_col.find({"status": "done", "admin_id": {"$in": p_ids}, "time": {"$gte": today_start}}))
+    today_total = sum(t['amount'] for t in today_txns)
+    
+    # 2. Unclaimed Balance Calculation
+    last_cleared = p_admin.get("last_cleared", datetime.min)
+    uncleared_txns = list(tx_col.find({"status": "done", "admin_id": {"$in": p_ids}, "time": {"$gt": last_cleared}}))
+    uncleared_total = sum(t['amount'] for t in uncleared_txns)
+    
+    advance = p_admin.get("advance_received", 0)
+    last_claimed = p_admin.get("last_claimed_amount", 0)
+    
+    # 3. This Month Revenue
+    month_txns = list(tx_col.find({"status": "done", "admin_id": {"$in": p_ids}, "time": {"$gte": month_start}}))
+    month_total = sum(t['amount'] for t in month_txns)
+    
+    is_sharing = p_admin.get("is_sharing", False)
+    
+    # डैशबोर्ड मैसेज तैयार करना
+    msg = "📊 **Your Performance Dashboard**\n"
+    msg += "━━━━━━━━━━━━━━━━━━━━\n"
+    
+    msg += f"📅 **TODAY'S REVENUE**\n"
+    msg += f"Total Balance Received Today: ₹{today_total}\n"
+    if is_sharing:
+        msg += f"Your Cut (30%): ₹{today_total * 0.30:.2f}\n"
+    msg += "━━━━━━━━━━━━━━━━━━━━\n"
+    
+    if is_sharing:
+        unclaimed = (uncleared_total * 0.30) - advance
+        msg += f"💰 **BALANCE CALCULATOR**\n"
+        msg += f"Your Total Unclaimed Balance: ₹{unclaimed:.2f}\n\n"
         
-    bot.send_message(message.chat.id, "📊 **रिपोर्ट का समय चुनें (Your Personal Stats):**", reply_markup=markup, parse_mode="Markdown")
+        msg += f"Your Last Claimed Balance: ₹{last_claimed:.2f}\n"
+        msg += f"Advance Received: ₹{advance:.2f}\n"
+        msg += "━━━━━━━━━━━━━━━━━━━━\n"
+        
+    msg += f"📆 **THIS MONTH REVENUE**\n"
+    msg += f"Total Balance: ₹{month_total}\n"
+    msg += "━━━━━━━━━━━━━━━━━━━━"
+    
+    bot.send_message(chat_id, msg, parse_mode="Markdown")
 
-@bot.callback_query_handler(func=lambda call: call.data == "stat_owner_menu")
-def owner_stats_menu(call):
+@bot.callback_query_handler(func=lambda call: call.data.startswith("stat_"))
+def process_owner_stats(call):
     if call.from_user.id != OWNER_ID: return
-    markup = InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        InlineKeyboardButton("Today (All)", callback_data="stat_today_all"),
-        InlineKeyboardButton("Yesterday (All)", callback_data="stat_yesterday_all"),
-        InlineKeyboardButton("Last 3 Days (All)", callback_data="stat_3d_all"),
-        InlineKeyboardButton("Last 7 Days (All)", callback_data="stat_7d_all"),
-        InlineKeyboardButton("This Month (All)", callback_data="stat_month_all"),
-        InlineKeyboardButton("Total (All)", callback_data="stat_all_all")
-    )
-    bot.edit_message_text("📊 **रिपोर्ट का समय चुनें (ALL ADMINS DATA):**", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("stat_") and call.data != "stat_owner_menu")
-def process_stats(call):
-    parts = call.data.split("_")
-    period = parts[1]
-    scope = parts[2] 
-    admin_id = call.from_user.id
+    period = call.data.split("_")[1]
     
     now = datetime.now()
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     
     query = {"status": "done"}
-    admin_data = admins_col.find_one({"user_id": admin_id})
-    is_sharing = admin_data.get("is_sharing", False)
     
-    if scope == "self":
-        query["admin_id"] = admin_id
-        header_text = "👤 **Your Personal Stats**"
-    else:
-        header_text = "👥 **Global Stats (All Admins)**"
-        
     if period == "today":
         query["time"] = {"$gte": today_start}
         time_text = "Today"
     elif period == "yesterday":
         query["time"] = {"$gte": today_start - timedelta(days=1), "$lt": today_start}
         time_text = "Yesterday"
-    elif period == "3d":
-        query["time"] = {"$gte": today_start - timedelta(days=3)}
-        time_text = "Last 3 Days"
-    elif period == "7d":
-        query["time"] = {"$gte": today_start - timedelta(days=7)}
-        time_text = "Last 7 Days"
     elif period == "month":
         query["time"] = {"$gte": now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)}
         time_text = "This Month"
@@ -422,36 +378,20 @@ def process_stats(call):
     total_amount = sum(t['amount'] for t in transactions)
     total_txns = len(transactions)
     
-    stats_msg = f"{header_text}\n🗓 **Period:** {time_text}\n\n💸 **Total Received:** ₹{total_amount}\n🔢 **Total TXNs:** {total_txns}\n"
+    stats_msg = f"👥 **Global Stats (All Admins)**\n🗓 **Period:** {time_text}\n\n💸 **Total Received:** ₹{total_amount}\n🔢 **Total TXNs:** {total_txns}\n\n**Admin Wise Breakdown:**\n"
     
-    # अगर यह शेयरिंग एडमिन है (30%), तो उसका खुद का प्रॉफिट दिखाएं
-    if scope == "self" and is_sharing:
-        my_share = total_amount * 0.30
-        owner_share = total_amount * 0.70
-        stats_msg += f"\n💰 **Your Profit (30%):** ₹{my_share:.2f}"
-        stats_msg += f"\n👑 **Owner's Cut (70%):** ₹{owner_share:.2f}\n"
-
-        # Uncleared Balance Calculator
-        last_cleared = admin_data.get("last_cleared", datetime.min)
-        uncleared_txns = list(tx_col.find({"status": "done", "admin_id": admin_id, "time": {"$gt": last_cleared}}))
-        uncleared_total = sum(t['amount'] for t in uncleared_txns)
-        stats_msg += f"\n⚠️ **Pending Balance (Since Last Clear):**"
-        stats_msg += f"\nTotal: ₹{uncleared_total}"
-        stats_msg += f"\nYour Balance to Keep: ₹{uncleared_total * 0.30:.2f}"
-    
-    if scope == "all":
-        stats_msg += "\n**Admin Wise Breakdown:**\n"
-        admins = admins_col.find()
-        for admin in admins:
-            admin_txns = [t for t in transactions if t.get('admin_id') == admin['user_id']]
-            if admin_txns:
-                admin_total = sum(t['amount'] for t in admin_txns)
-                stats_msg += f"🔸 {admin.get('name', admin['user_id'])}: ₹{admin_total} ({len(admin_txns)} txn)\n"
+    admins = admins_col.find()
+    for admin in admins:
+        admin_txns = [t for t in transactions if t.get('admin_id') == admin['user_id']]
+        if admin_txns:
+            admin_total = sum(t['amount'] for t in admin_txns)
+            stats_msg += f"🔸 {admin.get('name', admin['user_id'])}: ₹{admin_total} ({len(admin_txns)} txn)\n"
 
     bot.send_message(call.message.chat.id, stats_msg, parse_mode="Markdown")
     bot.answer_callback_query(call.id)
 
-# ================= 5. एडमिन पैनल & Partner Management =================
+
+# ================= 4. एडमिन पैनल & Partner Management =================
 
 @bot.message_handler(func=lambda msg: msg.text == "⚙️ Admin Panel")
 def admin_panel(message):
@@ -460,13 +400,13 @@ def admin_panel(message):
         
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add("➕ Add UPI", "➕ Add Admin")
-    markup.add("💰 Partner Balances", "🗑 Remove Manual TXN")
-    markup.add("⬅️ Back to Main")
+    markup.add("🔗 Link Sub-ID", "💰 Partner Balances")
+    markup.add("🗑 Remove Manual TXN", "⬅️ Back to Main")
     bot.send_message(message.chat.id, "⚙️ Admin Panel में आपका स्वागत है।", reply_markup=markup)
 
 @bot.message_handler(func=lambda msg: msg.text == "⬅️ Back to Main")
 def back_main(message):
-    bot.send_message(message.chat.id, "Main Menu:", reply_markup=main_menu())
+    bot.send_message(message.chat.id, "Main Menu:", reply_markup=main_menu(message.from_user.id))
 
 # --- Add UPI Flow ---
 @bot.message_handler(func=lambda msg: msg.text == "➕ Add UPI")
@@ -493,9 +433,9 @@ def save_upi(message, upi_id, name):
         "upi_id": upi_id, "name": name, "group": group, 
         "last_used": datetime.now()
     })
-    bot.send_message(message.chat.id, f"✅ UPI ID Successfully Added!\nUPI: {upi_id}\nGroup: {group}", reply_markup=main_menu())
+    bot.send_message(message.chat.id, f"✅ UPI ID Successfully Added!\nUPI: {upi_id}\nGroup: {group}", reply_markup=main_menu(message.from_user.id))
 
-# --- Add Admin Flow (Partner System Upgraded) ---
+# --- Add Admin Flow ---
 @bot.message_handler(func=lambda msg: msg.text == "➕ Add Admin")
 def add_admin_start(message):
     if message.from_user.id != OWNER_ID: return
@@ -508,7 +448,7 @@ def step_admin_name(message):
         msg = bot.send_message(message.chat.id, "नए एडमिन का नाम बताएं:")
         bot.register_next_step_handler(msg, step_admin_type, new_admin_id)
     except ValueError:
-        bot.send_message(message.chat.id, "❌ अमान्य आईडी!", reply_markup=main_menu())
+        bot.send_message(message.chat.id, "❌ अमान्य आईडी!", reply_markup=main_menu(message.from_user.id))
 
 def step_admin_type(message, new_admin_id):
     name = message.text
@@ -520,37 +460,91 @@ def step_admin_type(message, new_admin_id):
 def save_admin(message, new_admin_id, name):
     is_sharing = "Sharing" in message.text
     if admins_col.find_one({"user_id": new_admin_id}):
-        bot.send_message(message.chat.id, "❌ यह एडमिन पहले से मौजूद है!", reply_markup=main_menu())
+        bot.send_message(message.chat.id, "❌ यह एडमिन पहले से मौजूद है!", reply_markup=main_menu(message.from_user.id))
     else:
         admins_col.insert_one({
             "user_id": new_admin_id, 
             "name": name, 
-            "use_tr": True,
             "is_sharing": is_sharing,
+            "primary_id": new_admin_id,
+            "advance_received": 0,
+            "last_claimed_amount": 0,
             "last_cleared": datetime.now()
         })
-        bot.send_message(message.chat.id, f"✅ Admin Added!\nName: {name}\nType: {'Sharing (30%)' if is_sharing else 'Regular'}", reply_markup=main_menu())
+        bot.send_message(message.chat.id, f"✅ Admin Added!\nName: {name}\nType: {'Sharing (30%)' if is_sharing else 'Regular'}", reply_markup=main_menu(message.from_user.id))
 
-# --- Partner Balance / Clear System ---
+# --- Link Sub-ID Flow (Multiple IDs mapping) ---
+@bot.message_handler(func=lambda msg: msg.text == "🔗 Link Sub-ID")
+def link_subid_start(message):
+    if message.from_user.id != OWNER_ID: return
+    msg = bot.send_message(message.chat.id, "नई Telegram ID भेजें जिसे लिंक करना है:")
+    bot.register_next_step_handler(msg, step_link_subid)
+    
+def step_link_subid(message):
+    try:
+        new_id = int(message.text)
+        if admins_col.find_one({"user_id": new_id}):
+            return bot.send_message(message.chat.id, "❌ यह ID सिस्टम में पहले से मौजूद है।")
+        
+        all_partners = list(admins_col.find({"is_sharing": True}))
+        main_partners = [p for p in all_partners if p.get("primary_id", p["user_id"]) == p["user_id"]]
+        
+        if not main_partners:
+            return bot.send_message(message.chat.id, "❌ कोई Sharing Partner मौजूद नहीं है। पहले ➕ Add Admin से पार्टनर बनाएँ।")
+            
+        markup = InlineKeyboardMarkup(row_width=1)
+        for p in main_partners:
+            markup.add(InlineKeyboardButton(p["name"], callback_data=f"linkto_{new_id}_{p['user_id']}"))
+        
+        bot.send_message(message.chat.id, "इस ID को किस मेन पार्टनर के खाते से लिंक करना है?", reply_markup=markup)
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ अमान्य आईडी।")
+        
+@bot.callback_query_handler(func=lambda call: call.data.startswith("linkto_"))
+def process_link(call):
+    if call.from_user.id != OWNER_ID: return
+    parts = call.data.split("_")
+    new_id = int(parts[1])
+    primary_id = int(parts[2])
+    
+    p_admin = admins_col.find_one({"user_id": primary_id})
+    
+    admins_col.insert_one({
+        "user_id": new_id,
+        "name": p_admin["name"] + " (Linked)",
+        "is_sharing": True,
+        "primary_id": primary_id,
+        "last_cleared": datetime.now()
+    })
+    bot.edit_message_text(f"✅ ID {new_id} सफलतापूर्वक {p_admin['name']} के साथ लिंक हो गई है!\n(दोनों का हिसाब एक ही जगह दिखेगा)", call.message.chat.id, call.message.message_id)
+
+# --- Partner Balance / Advance / Clear System ---
 @bot.message_handler(func=lambda msg: msg.text == "💰 Partner Balances")
 def partner_balances(message):
     if message.from_user.id != OWNER_ID: return
     
-    partners = list(admins_col.find({"is_sharing": True}))
-    if not partners:
+    all_partners = list(admins_col.find({"is_sharing": True}))
+    main_partners = [p for p in all_partners if p.get("primary_id", p["user_id"]) == p["user_id"]]
+    
+    if not main_partners:
         return bot.send_message(message.chat.id, "❌ आपका कोई Sharing Partner नहीं है।")
         
     markup = InlineKeyboardMarkup(row_width=1)
-    for partner in partners:
+    for partner in main_partners:
+        partner_id = partner["user_id"]
+        
+        linked = list(admins_col.find({"primary_id": partner_id}))
+        p_ids = [a["user_id"] for a in linked]
+        if partner_id not in p_ids: p_ids.append(partner_id)
+        
         last_cleared = partner.get("last_cleared", datetime.min)
-        # पिछले क्लियर के बाद का टोटल
-        uncleared_txns = list(tx_col.find({"status": "done", "admin_id": partner["user_id"], "time": {"$gt": last_cleared}}))
+        uncleared_txns = list(tx_col.find({"status": "done", "admin_id": {"$in": p_ids}, "time": {"$gt": last_cleared}}))
         uncleared_total = sum(t['amount'] for t in uncleared_txns)
         
-        btn_text = f"👤 {partner['name']} | Pending Total: ₹{uncleared_total}"
-        markup.add(InlineKeyboardButton(btn_text, callback_data=f"partner_{partner['user_id']}"))
+        btn_text = f"👤 {partner['name']} | Total: ₹{uncleared_total}"
+        markup.add(InlineKeyboardButton(btn_text, callback_data=f"partner_{partner_id}"))
         
-    bot.send_message(message.chat.id, "👥 **पार्टनर बैलेंस मैनेज करें:**\n(किसी भी पार्टनर का हिसाब क्लियर करने के लिए उस पर क्लिक करें)", reply_markup=markup, parse_mode="Markdown")
+    bot.send_message(message.chat.id, "👥 **पार्टनर बैलेंस मैनेज करें:**\n(किसी भी पार्टनर का हिसाब देखने और क्लियर करने के लिए क्लिक करें)", reply_markup=markup, parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("partner_"))
 def partner_details(call):
@@ -558,26 +552,70 @@ def partner_details(call):
     partner_id = int(call.data.split("_")[1])
     partner = admins_col.find_one({"user_id": partner_id})
     
+    linked = list(admins_col.find({"primary_id": partner_id}))
+    p_ids = [a["user_id"] for a in linked]
+    if partner_id not in p_ids: p_ids.append(partner_id)
+    
     last_cleared = partner.get("last_cleared", datetime.min)
-    uncleared_txns = list(tx_col.find({"status": "done", "admin_id": partner_id, "time": {"$gt": last_cleared}}))
+    uncleared_txns = list(tx_col.find({"status": "done", "admin_id": {"$in": p_ids}, "time": {"$gt": last_cleared}}))
     uncleared_total = sum(t['amount'] for t in uncleared_txns)
     
+    share_30 = uncleared_total * 0.30
+    share_70 = uncleared_total * 0.70
+    advance = partner.get("advance_received", 0)
+    net_payable = share_30 - advance
+    
     msg = (f"👤 **Partner:** {partner['name']}\n"
-           f"💸 **Total Uncleared Amount:** ₹{uncleared_total}\n\n"
-           f"🔹 **Partner Share (30%):** ₹{uncleared_total * 0.30:.2f}\n"
-           f"👑 **Your Share (70%):** ₹{uncleared_total * 0.70:.2f}\n")
+           f"🔗 **Linked Accounts:** {len(p_ids)}\n\n"
+           f"💸 **Total Uncleared Amount:** ₹{uncleared_total}\n"
+           f"🔹 **Partner Share (30%):** ₹{share_30:.2f}\n"
+           f"👑 **Your Share (70%):** ₹{share_70:.2f}\n\n"
+           f"💵 **Advance Given:** ₹{advance:.2f}\n"
+           f"✅ **Net Payable to Partner:** ₹{net_payable:.2f}\n")
            
-    markup = InlineKeyboardMarkup()
-    markup.add(InlineKeyboardButton("✅ Mark as Cleared / Reset", callback_data=f"clear_bal_{partner_id}"))
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(InlineKeyboardButton("➕ Give Advance", callback_data=f"giveadv_{partner_id}"))
+    markup.add(InlineKeyboardButton("✅ Mark as Cleared (Claim)", callback_data=f"clearbal_{partner_id}_{net_payable}"))
     bot.edit_message_text(msg, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("clear_bal_"))
+# Advance Handler
+@bot.callback_query_handler(func=lambda call: call.data.startswith("giveadv_"))
+def give_advance_start(call):
+    if call.from_user.id != OWNER_ID: return
+    partner_id = int(call.data.split("_")[1])
+    msg = bot.send_message(call.message.chat.id, "इस पार्टनर को कितना एडवांस देना है? (Amount लिखें):")
+    bot.register_next_step_handler(msg, process_give_advance, partner_id)
+    
+def process_give_advance(message, partner_id):
+    try:
+        amt = float(message.text)
+        admins_col.update_one(
+            {"user_id": partner_id},
+            {"$inc": {"advance_received": amt}}
+        )
+        bot.send_message(message.chat.id, f"✅ ₹{amt} का एडवांस सफलतापूर्वक जुड़ गया!")
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ अमान्य अमाउंट।")
+
+# Clear Balance Handler
+@bot.callback_query_handler(func=lambda call: call.data.startswith("clearbal_"))
 def clear_partner_balance(call):
     if call.from_user.id != OWNER_ID: return
-    partner_id = int(call.data.split("clear_bal_")[1])
+    parts = call.data.split("_")
+    partner_id = int(parts[1])
+    net_paid = float(parts[2])
     
-    admins_col.update_one({"user_id": partner_id}, {"$set": {"last_cleared": datetime.now()}})
-    bot.answer_callback_query(call.id, "✅ बैलेंस सफलतापूर्वक क्लियर (0) कर दिया गया है!", show_alert=True)
+    admins_col.update_one(
+        {"user_id": partner_id}, 
+        {
+            "$set": {
+                "last_cleared": datetime.now(),
+                "last_claimed_amount": net_paid,
+                "advance_received": 0
+            }
+        }
+    )
+    bot.answer_callback_query(call.id, "✅ बैलेंस सफलतापूर्वक क्लियर कर दिया गया है!", show_alert=True)
     bot.delete_message(call.message.chat.id, call.message.message_id)
 
 # --- Remove Manual Transaction ---
@@ -596,5 +634,5 @@ def delete_txn(message):
         bot.send_message(message.chat.id, "❌ यह TXN ID नहीं मिली।")
 
 # ================= BOT RUNNER =================
-print("Bot is running with Advanced Sharing & Pre-fill Message Features...")
+print("Bot is running with Multi-ID, Calculator Board & Clean QR...")
 bot.infinity_polling()

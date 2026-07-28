@@ -11,7 +11,7 @@ import os
 from bson.objectid import ObjectId
 
 # ================= कॉन्फ़िगरेशन =================
-BOT_TOKEN = "8740636028:AAFKOpliANI816prOplKF1FB9qxF7TkKoG8"
+BOT_TOKEN = "8614091032:AAGRIyHzEQt0RANsLPVejlOAbJv5tEWb9FA"
 MONGO_URI = "mongodb+srv://Tejas7xx:mrxtejas7@cluster0.akhlgjf.mongodb.net/?appName=Cluster0"
 OWNER_ID = 8702240402 # अपनी टेलीग्राम यूजर आईडी यहाँ डालें
 

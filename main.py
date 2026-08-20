@@ -13,7 +13,7 @@ from bson.objectid import ObjectId
 # ================= कॉन्फ़िगरेशन =================
 BOT_TOKEN = "8614091032:AAGRIyHzEQt0RANsLPVejlOAbJv5tEWb9FA"
 MONGO_URI = "mongodb+srv://Tejas7xx:mrxtejas7@cluster0.akhlgjf.mongodb.net/?appName=Cluster0"
-OWNER_ID = 8702240402 # अपनी टेलीग्राम यूजर आईडी यहाँ डालें
+OWNER_ID = 7121137252 # अपनी टेलीग्राम यूजर आईडी यहाँ डालें
 
 LOG_GROUP_ID = OWNER_ID 
 

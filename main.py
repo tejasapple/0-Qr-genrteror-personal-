@@ -6,14 +6,12 @@ import io
 import uuid
 from datetime import datetime, timedelta
 from PIL import Image
-import csv
-import os
 from bson.objectid import ObjectId
 
 # ================= कॉन्फ़िगरेशन =================
 BOT_TOKEN = "8847025807:AAFPlpDrpAlQp-Fi5jBPIZlMjmcmRPDIB04"
 MONGO_URI = "mongodb+srv://Tejas7xx:mrxtejas7@cluster0.akhlgjf.mongodb.net/?appName=Cluster0"
-OWNER_ID = 7121137252 # अपनी टेलीग्राम यूजर आईडी यहाँ डालें
+OWNER_ID = 7121137252
 
 LOG_GROUP_ID = OWNER_ID 
 
@@ -51,17 +49,26 @@ def is_admin(user_id):
     return user_id == OWNER_ID or admins_col.find_one({"user_id": user_id}) is not None
 
 def get_next_upi(group):
-    query = {} if group == "All" else {"group": group}
+    now = datetime.now()
+    # Waiting filter: check if waiting_until is either absent or expired
+    query = {
+        "$or": [
+            {"waiting_until": {"$exists": False}},
+            {"waiting_until": None},
+            {"waiting_until": {"$lte": now}}
+        ]
+    }
+    if group != "All":
+        query["group"] = group
+
+    # Round-robin / Least recently used selection
     upi = upi_col.find_one(query, sort=[("last_used", 1)])
-    if upi:
-        upi_col.update_one({"_id": upi["_id"]}, {"$set": {"last_used": datetime.now()}})
     return upi
 
 def generate_qr_image(upi_id, name, amount, tx_id):
     setting = settings_col.find_one({"_id": "qr_setting"})
     include_txn = setting.get("include_txn", True) if setting else True
     
-    # अगर सेटिंग ON है तो ट्रांजैक्शन ID देंगे, वर्ना सिर्फ अमाउंट
     if include_txn:
         upi_url = f"upi://pay?pa={upi_id}&pn={name}&am={amount}&tr={tx_id}&tn={tx_id}"
     else:
@@ -141,7 +148,7 @@ def process_custom_amount(message, group):
 def create_and_send_qr(message, amount, group, admin_id):
     upi = get_next_upi(group)
     if not upi:
-        bot.send_message(message.chat.id, f"❌ {group} ग्रुप में कोई UPI ID नहीं मिली!")
+        bot.send_message(message.chat.id, f"❌ {group} ग्रुप में कोई एक्टिव UPI ID उपलब्ध नहीं है!")
         return
         
     tx_id = "TXN" + str(uuid.uuid4().hex)[:10].upper()
@@ -154,23 +161,41 @@ def create_and_send_qr(message, amount, group, admin_id):
     
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
-        InlineKeyboardButton("✅ Payment Done", callback_data=f"done_{tx_id}"),
-        InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{tx_id}")
+        InlineKeyboardButton("✅ Add Payment", callback_data=f"done_{tx_id}"),
+        InlineKeyboardButton("❌ Decline", callback_data=f"cancel_{tx_id}")
+    )
+    markup.add(
+        InlineKeyboardButton("⏳ Waiting (12h)", callback_data=f"wait_12_{tx_id}"),
+        InlineKeyboardButton("⏳ Waiting (24h)", callback_data=f"wait_24_{tx_id}")
     )
     markup.add(InlineKeyboardButton("🔄 Regenerate (Next UPI)", callback_data=f"regen_{tx_id}"))
     
-    caption = f"🧾 **Payment QR**\n\n💸 Amount: ₹{amount}\n🆔 TXN ID: `{tx_id}`\n🏦 UPI: `{upi['upi_id']}`"
+    caption = f"🧾 **Payment QR**\n\n💸 Amount: ₹{amount}\n🆔 TXN ID: `{tx_id}`\n🏦 UPI: `{upi['upi_id']}`\n👤 Name: {upi['name']}"
     bot.send_photo(message.chat.id, qr_img, caption=caption, parse_mode="Markdown", reply_markup=markup)
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith(("done_", "cancel_", "regen_")))
+@bot.callback_query_handler(func=lambda call: call.data.startswith(("done_", "cancel_", "regen_", "wait_")))
 def handle_tx_action(call):
-    action, tx_id = call.data.split("_")
+    data_parts = call.data.split("_")
+    action = data_parts[0]
+    
+    if action == "wait":
+        hours = int(data_parts[1])
+        tx_id = data_parts[2]
+    else:
+        tx_id = data_parts[1]
+        
     tx = tx_col.find_one({"tx_id": tx_id})
-    if not tx: return bot.answer_callback_query(call.id, "Transaction not found!")
+    if not tx: 
+        return bot.answer_callback_query(call.id, "Transaction not found!")
 
     if action == "done":
+        # Update transaction status
         tx_col.update_one({"tx_id": tx_id}, {"$set": {"status": "done"}})
-        bot.edit_message_caption("✅ **PAYMENT RECEIVED & SAVED!**\n\n" + call.message.caption, 
+        
+        # Mark UPI as recently used so other UPIs get priority in round-robin
+        upi_col.update_one({"upi_id": tx["upi_id"]}, {"$set": {"last_used": datetime.now()}})
+        
+        bot.edit_message_caption("✅ **PAYMENT RECEIVED & ADDED!**\n\n" + call.message.caption, 
                                  call.message.chat.id, call.message.message_id, parse_mode="Markdown")
                                  
         admin_info = admins_col.find_one({"user_id": call.from_user.id})
@@ -178,7 +203,6 @@ def handle_tx_action(call):
         username = f"@{call.from_user.username}" if call.from_user.username else "No Username"
         time_str = datetime.now().strftime("%I:%M %p, %d %b %Y")
         
-        # Payment Approval Notification (Owner & Admin)
         notify_msg = (
             f"🟢 **PAYMENT APPROVED**\n\n"
             f"👤 **Admin Name:** {admin_name}\n"
@@ -195,12 +219,20 @@ def handle_tx_action(call):
                 bot.send_message(call.from_user.id, notify_msg, parse_mode="Markdown")
         except Exception as e:
             print("Notification error:", e)
-            
+
     elif action == "cancel":
         tx_col.update_one({"tx_id": tx_id}, {"$set": {"status": "cancelled"}})
-        bot.edit_message_caption("❌ **PAYMENT CANCELLED**\n\n" + call.message.caption, 
+        bot.edit_message_caption("❌ **PAYMENT DECLINED**\n\n" + call.message.caption, 
                                  call.message.chat.id, call.message.message_id, parse_mode="Markdown")
-                                 
+
+    elif action == "wait":
+        until = datetime.now() + timedelta(hours=hours)
+        upi_col.update_one({"upi_id": tx["upi_id"]}, {"$set": {"waiting_until": until}})
+        tx_col.update_one({"tx_id": tx_id}, {"$set": {"status": "waiting"}})
+        bot.answer_callback_query(call.id, f"⚠️ UPI put on hold for {hours} hours!", show_alert=True)
+        bot.edit_message_caption(f"⏳ **UPI PUT IN WAITING ({hours} Hours)**\n\n" + call.message.caption, 
+                                 call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+
     elif action == "regen":
         tx_col.update_one({"tx_id": tx_id}, {"$set": {"status": "cancelled"}})
         bot.delete_message(call.message.chat.id, call.message.message_id)
@@ -213,21 +245,23 @@ def show_stats_menu(message):
     user_id = message.from_user.id
     if not is_admin(user_id): return
     
+    markup = InlineKeyboardMarkup(row_width=2)
     if user_id == OWNER_ID:
-        markup = InlineKeyboardMarkup(row_width=2)
         markup.add(
-            InlineKeyboardButton("Today (All)", callback_data="stat_today_all"),
-            InlineKeyboardButton("Yesterday (All)", callback_data="stat_yesterday_all"),
-            InlineKeyboardButton("This Month (All)", callback_data="stat_month_all"),
-            InlineKeyboardButton("Total (All)", callback_data="stat_all_all")
+            InlineKeyboardButton("📅 Today", callback_data="stat_today"),
+            InlineKeyboardButton("📆 Yesterday", callback_data="stat_yesterday"),
+            InlineKeyboardButton("📊 Last 3 Days", callback_data="stat_last3"),
+            InlineKeyboardButton("📈 Last 7 Days (Daily)", callback_data="stat_last7"),
+            InlineKeyboardButton("🗓 This Month", callback_data="stat_month"),
+            InlineKeyboardButton("🌐 Total (All Time)", callback_data="stat_all")
         )
         bot.send_message(message.chat.id, "👑 **Owner Global Stats View:**", reply_markup=markup, parse_mode="Markdown")
     else:
-        # Normal Admin Stats Keyboard
-        markup = InlineKeyboardMarkup(row_width=3)
         markup.add(
             InlineKeyboardButton("📅 Today", callback_data="pstat_today"),
-            InlineKeyboardButton("📆 Last Day", callback_data="pstat_yesterday"),
+            InlineKeyboardButton("📆 Yesterday", callback_data="pstat_yesterday"),
+            InlineKeyboardButton("📊 Last 3 Days", callback_data="pstat_last3"),
+            InlineKeyboardButton("📈 Last 7 Days (Daily)", callback_data="pstat_last7"),
             InlineKeyboardButton("🗓 This Month", callback_data="pstat_month")
         )
         bot.send_message(message.chat.id, "📊 **Select Period to View Stats:**", reply_markup=markup, parse_mode="Markdown")
@@ -248,36 +282,53 @@ def process_partner_stats(call):
     now = datetime.now()
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    yesterday_start = today_start - timedelta(days=1)
     
+    is_sharing = p_admin.get("is_sharing", False)
+    
+    if period == "last7":
+        msg = "📈 **PAST 7 DAYS DAILY REPORT**\n━━━━━━━━━━━━━━━━━━━━\n"
+        total_7d = 0
+        for i in range(7):
+            d_start = today_start - timedelta(days=i)
+            d_end = d_start + timedelta(days=1)
+            txns = list(tx_col.find({"status": "done", "admin_id": {"$in": p_ids}, "time": {"$gte": d_start, "$lt": d_end}}))
+            day_sum = sum(t['amount'] for t in txns)
+            total_7d += day_sum
+            day_label = "Today" if i == 0 else ("Yesterday" if i == 1 else f"Day -{i} ({d_start.strftime('%d %b')})")
+            msg += f"▫️ **{day_label}:** ₹{day_sum}\n"
+        msg += "━━━━━━━━━━━━━━━━━━━━\n"
+        msg += f"💰 **7-Day Total:** ₹{total_7d}\n"
+        if is_sharing:
+            msg += f"💵 **7-Day Income (30%):** ₹{total_7d * 0.30:.2f}\n"
+        bot.edit_message_text(msg, call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+        return
+
     if period == "today":
         q_start, q_end = today_start, now
         title = "TODAY'S"
     elif period == "yesterday":
-        q_start, q_end = yesterday_start, today_start
-        title = "LAST DAY'S"
+        q_start, q_end = today_start - timedelta(days=1), today_start
+        title = "YESTERDAY'S"
+    elif period == "last3":
+        q_start, q_end = today_start - timedelta(days=2), now
+        title = "LAST 3 DAYS'"
     else: # month
         q_start, q_end = month_start, now
         title = "THIS MONTH'S"
 
-    # Specific Period Calculation
     period_txns = list(tx_col.find({"status": "done", "admin_id": {"$in": p_ids}, "time": {"$gte": q_start, "$lt": q_end}}))
     period_total = sum(t['amount'] for t in period_txns)
     
-    # Global/Month Calculations for constant display
     month_txns = list(tx_col.find({"status": "done", "admin_id": {"$in": p_ids}, "time": {"$gte": month_start}}))
     month_total = sum(t['amount'] for t in month_txns)
-    month_income = month_total * 0.30 if p_admin.get("is_sharing") else month_total
+    month_income = month_total * 0.30 if is_sharing else month_total
 
-    # Pending Balance Calculation
     last_cleared = p_admin.get("last_cleared", datetime.min)
     uncleared_txns = list(tx_col.find({"status": "done", "admin_id": {"$in": p_ids}, "time": {"$gt": last_cleared}}))
     uncleared_total = sum(t['amount'] for t in uncleared_txns)
     
     advance = p_admin.get("advance_received", 0)
     last_claimed = p_admin.get("last_claimed_amount", 0)
-    
-    is_sharing = p_admin.get("is_sharing", False)
     pending_balance = (uncleared_total * 0.30) - advance if is_sharing else uncleared_total
     
     msg = f"📊 **{title} DASHBOARD**\n"
@@ -288,12 +339,11 @@ def process_partner_stats(call):
     msg += "━━━━━━━━━━━━━━━━━━━━\n"
     
     if is_sharing:
-        msg += f"⏳ **Total Pending Balance This Month:** ₹{pending_balance:.2f}\n"
+        msg += f"⏳ **Total Pending Balance:** ₹{pending_balance:.2f}\n"
         msg += f"✅ **Last Claimed Balance:** ₹{last_claimed:.2f}\n"
         msg += "━━━━━━━━━━━━━━━━━━━━\n"
         
     msg += f"📈 **Total Income This Month:** ₹{month_income:.2f}\n"
-    
     bot.edit_message_text(msg, call.message.chat.id, call.message.message_id, parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("stat_"))
@@ -304,6 +354,22 @@ def process_owner_stats(call):
     now = datetime.now()
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     
+    if period == "last7":
+        msg = "📈 **GLOBAL PAST 7 DAYS DAILY BREAKDOWN**\n━━━━━━━━━━━━━━━━━━━━\n"
+        total_7d = 0
+        for i in range(7):
+            d_start = today_start - timedelta(days=i)
+            d_end = d_start + timedelta(days=1)
+            txns = list(tx_col.find({"status": "done", "time": {"$gte": d_start, "$lt": d_end}}))
+            day_sum = sum(t['amount'] for t in txns)
+            total_7d += day_sum
+            day_label = "Today" if i == 0 else ("Yesterday" if i == 1 else f"Day -{i} ({d_start.strftime('%d %b')})")
+            msg += f"▫️ **{day_label}:** ₹{day_sum} ({len(txns)} txns)\n"
+        msg += "━━━━━━━━━━━━━━━━━━━━\n"
+        msg += f"💰 **Total 7-Day Collection:** ₹{total_7d}\n"
+        bot.edit_message_text(msg, call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+        return
+
     query = {"status": "done"}
     if period == "today":
         query["time"] = {"$gte": today_start}
@@ -311,6 +377,9 @@ def process_owner_stats(call):
     elif period == "yesterday":
         query["time"] = {"$gte": today_start - timedelta(days=1), "$lt": today_start}
         time_text = "Yesterday"
+    elif period == "last3":
+        query["time"] = {"$gte": today_start - timedelta(days=2)}
+        time_text = "Last 3 Days"
     elif period == "month":
         query["time"] = {"$gte": now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)}
         time_text = "This Month"
@@ -322,7 +391,6 @@ def process_owner_stats(call):
     
     stats_msg = f"👥 **Global Stats (All Admins)**\n🗓 **Period:** {time_text}\n\n💸 **Total Received:** ₹{total_amount}\n\n**Admin Wise Breakdown:**\n"
     
-    # Admin & Sub-ID Breakdown
     main_admins = list(admins_col.find({"$expr": {"$eq": ["$user_id", "$primary_id"]}}))
     for main_admin in main_admins:
         sub_admins = list(admins_col.find({"primary_id": main_admin["user_id"]}))
@@ -340,16 +408,91 @@ def process_owner_stats(call):
 
     bot.edit_message_text(stats_msg, call.message.chat.id, call.message.message_id, parse_mode="Markdown")
 
-# ================= 3. एडमिन पैनल & Settings =================
+# ================= 3. एडमिन पैनल & UPI Management =================
 
 @bot.message_handler(func=lambda msg: msg.text == "⚙️ Admin Panel")
 def admin_panel(message):
     if message.from_user.id != OWNER_ID: return
     markup = ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add("➕ Add UPI", "👥 Manage Admins")
-    markup.add("⚙️ QR Setting (TXN ID)", "💰 Partner Balances")
-    markup.add("🗑 Remove Manual TXN", "⬅️ Back to Main")
+    markup.add("➕ Add UPI", "📋 List & Manage UPIs")
+    markup.add("👥 Manage Admins", "💰 Partner Balances")
+    markup.add("⚙️ QR Setting (TXN ID)", "🗑 Remove Manual TXN")
+    markup.add("⬅️ Back to Main")
     bot.send_message(message.chat.id, "⚙️ Admin Panel में आपका स्वागत है।", reply_markup=markup)
+
+@bot.message_handler(func=lambda msg: msg.text == "📋 List & Manage UPIs")
+def list_manage_upis(message):
+    if message.from_user.id != OWNER_ID: return
+    upis = list(upi_col.find())
+    if not upis:
+        bot.send_message(message.chat.id, "❌ कोई भी UPI ID डेटाबेस में नहीं मिली।")
+        return
+        
+    markup = InlineKeyboardMarkup(row_width=1)
+    now = datetime.now()
+    for u in upis:
+        status = "🟢 Active"
+        if u.get("waiting_until") and u["waiting_until"] > now:
+            status = f"⏳ Wait ({u['waiting_until'].strftime('%H:%M')})"
+        btn_text = f"{u['name']} | {u['group']} | {status} | {u['upi_id']}"
+        markup.add(InlineKeyboardButton(btn_text, callback_data=f"viewupi_{str(u['_id'])}"))
+        
+    bot.send_message(message.chat.id, "📋 **मौजूदा UPI IDs की लिस्ट:**\nहटाने या डिटेल्स देखने के लिए किसी पर क्लिक करें:", reply_markup=markup, parse_mode="Markdown")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("viewupi_"))
+def view_upi_options(call):
+    if call.from_user.id != OWNER_ID: return
+    upi_id_str = call.data.split("_")[1]
+    upi = upi_col.find_one({"_id": ObjectId(upi_id_str)})
+    if not upi:
+        return bot.answer_callback_query(call.id, "UPI नहीं मिली!")
+        
+    now = datetime.now()
+    is_waiting = upi.get("waiting_until") and upi["waiting_until"] > now
+    status_str = f"⏳ In Waiting till {upi['waiting_until'].strftime('%I:%M %p, %d %b')}" if is_waiting else "🟢 Active & Available"
+    
+    msg = (f"🏦 **UPI ID:** `{upi['upi_id']}`\n"
+           f"👤 **Name:** {upi['name']}\n"
+           f"📁 **Group:** {upi['group']}\n"
+           f"📊 **Status:** {status_str}\n")
+           
+    markup = InlineKeyboardMarkup(row_width=1)
+    if is_waiting:
+        markup.add(InlineKeyboardButton("🟢 Remove Waiting (Make Active)", callback_data=f"unwait_{upi_id_str}"))
+    markup.add(InlineKeyboardButton("🗑 Delete/Remove This UPI", callback_data=f"delupi_{upi_id_str}"))
+    markup.add(InlineKeyboardButton("⬅️ Back to List", callback_data="back_to_upi_list"))
+    
+    bot.edit_message_text(msg, call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
+
+@bot.callback_query_handler(func=lambda call: call.data == "back_to_upi_list")
+def back_to_upi_list_cb(call):
+    if call.from_user.id != OWNER_ID: return
+    upis = list(upi_col.find())
+    markup = InlineKeyboardMarkup(row_width=1)
+    now = datetime.now()
+    for u in upis:
+        status = "🟢 Active"
+        if u.get("waiting_until") and u["waiting_until"] > now:
+            status = f"⏳ Wait ({u['waiting_until'].strftime('%H:%M')})"
+        btn_text = f"{u['name']} | {u['group']} | {status} | {u['upi_id']}"
+        markup.add(InlineKeyboardButton(btn_text, callback_data=f"viewupi_{str(u['_id'])}"))
+    bot.edit_message_text("📋 **मौजूदा UPI IDs की लिस्ट:**", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("unwait_"))
+def unwait_upi_action(call):
+    if call.from_user.id != OWNER_ID: return
+    upi_id_str = call.data.split("_")[1]
+    upi_col.update_one({"_id": ObjectId(upi_id_str)}, {"$unset": {"waiting_until": ""}})
+    bot.answer_callback_query(call.id, "✅ UPI को Active कर दिया गया है!", show_alert=True)
+    view_upi_options(call)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("delupi_"))
+def delete_upi_action(call):
+    if call.from_user.id != OWNER_ID: return
+    upi_id_str = call.data.split("_")[1]
+    upi_col.delete_one({"_id": ObjectId(upi_id_str)})
+    bot.answer_callback_query(call.id, "🗑 UPI ID हटा दी गई!", show_alert=True)
+    back_to_upi_list_cb(call)
 
 @bot.message_handler(func=lambda msg: msg.text == "⚙️ QR Setting (TXN ID)")
 def toggle_qr_setting(message):
@@ -388,8 +531,14 @@ def step_upi_group(message, upi_id):
 
 def save_upi(message, upi_id, name):
     group = message.text
-    upi_col.insert_one({"upi_id": upi_id, "name": name, "group": group, "last_used": datetime.now()})
-    bot.send_message(message.chat.id, f"✅ UPI ID Added!", reply_markup=main_menu(message.from_user.id))
+    upi_col.insert_one({
+        "upi_id": upi_id, 
+        "name": name, 
+        "group": group, 
+        "last_used": datetime.min,
+        "waiting_until": None
+    })
+    bot.send_message(message.chat.id, f"✅ UPI ID '{upi_id}' सफलतापूर्वक जुड़ गई!", reply_markup=main_menu(message.from_user.id))
 
 # --- Manage Admins Flow ---
 @bot.message_handler(func=lambda msg: msg.text == "👥 Manage Admins")
@@ -535,7 +684,6 @@ def process_give_advance(message, partner_id):
         amt = float(message.text)
         partner = admins_col.find_one({"user_id": partner_id})
         
-        # Calculate old pending
         linked = list(admins_col.find({"primary_id": partner_id}))
         p_ids = [a["user_id"] for a in linked]
         last_cleared = partner.get("last_cleared", datetime.min)
@@ -548,11 +696,9 @@ def process_give_advance(message, partner_id):
         new_advance = old_advance + amt
         new_pending = (uncleared_total * 0.30) - new_advance
         
-        # Update DB
         admins_col.update_one({"user_id": partner_id}, {"$set": {"advance_received": new_advance}})
         bot.send_message(message.chat.id, f"✅ एडवांस अपडेट हो गया!")
         
-        # Notify Admin securely
         notify_msg = (
             f"🔔 **Advance Balance Update**\n\n"
             f"🔹 **Previous Pending Balance:** ₹{old_pending:.2f}\n"
@@ -564,7 +710,7 @@ def process_give_advance(message, partner_id):
         try:
             bot.send_message(partner_id, notify_msg, parse_mode="Markdown")
         except:
-            pass # In case admin blocked the bot
+            pass
             
     except ValueError:
         bot.send_message(message.chat.id, "❌ अमान्य अमाउंट।")
@@ -598,7 +744,7 @@ def delete_txn(message):
     else:
         bot.send_message(message.chat.id, "❌ यह TXN ID नहीं मिली।")
 
-# ================= 4. My Saved QRs (Unchanged) =================
+# ================= 4. My Saved QRs =================
 @bot.message_handler(func=lambda msg: msg.text == "🖼 My Saved QRs")
 def my_qrs_menu(message):
     if not is_admin(message.from_user.id): return
@@ -648,5 +794,5 @@ def saved_show_specific(call):
         bot.answer_callback_query(call.id, "QR not found!")
 
 # ================= BOT RUNNER =================
-print("Bot is running with Advanced Stats & Features...")
+print("Bot is running with Advanced Stats & Rotation Logic...")
 bot.infinity_polling()

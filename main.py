@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from PIL import Image
 from bson.objectid import ObjectId
 
-# ================= कॉन्फ़िगरेशन =================
+# ================= Configuration =================
 BOT_TOKEN = "8966888657:AAEl5dGNrPk_QzPz8r4XZat01mIfJMNVC7k"
 MONGO_URI = "mongodb+srv://Tejas7xx:mrxtejas7@cluster0.akhlgjf.mongodb.net/?appName=Cluster0"
 OWNER_ID = 7121137252
@@ -17,7 +17,7 @@ LOG_GROUP_ID = OWNER_ID
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# ================= डेटाबेस सेटअप =================
+# ================= Database Setup =================
 client = pymongo.MongoClient(MONGO_URI)
 db = client['upi_master_bot']
 
@@ -27,11 +27,11 @@ tx_col = db['transactions']
 saved_qrs_col = db['saved_qrs']
 settings_col = db['settings']
 
-# डिफ़ॉल्ट सेटिंग्स इनिशियलाइज़ करना
+# Initialize default settings
 if not settings_col.find_one({"_id": "qr_setting"}):
     settings_col.insert_one({"_id": "qr_setting", "include_txn": True})
 
-# Owner को डिफ़ॉल्ट एडमिन बनाना
+# Make Owner the default admin
 if not admins_col.find_one({"user_id": OWNER_ID}):
     admins_col.insert_one({
         "user_id": OWNER_ID, 
@@ -43,7 +43,7 @@ if not admins_col.find_one({"user_id": OWNER_ID}):
         "last_claimed_amount": 0
     })
 
-# ================= हेल्पर फंक्शन्स =================
+# ================= Helper Functions =================
 
 def is_admin(user_id):
     return user_id == OWNER_ID or admins_col.find_one({"user_id": user_id}) is not None
@@ -84,7 +84,7 @@ def generate_qr_image(upi_id, name, amount, tx_id):
     bio.seek(0)
     return bio
 
-# ================= मेन्यू और कीबोर्ड्स =================
+# ================= Menus & Keyboards =================
 
 def main_menu(user_id):
     markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
@@ -94,16 +94,16 @@ def main_menu(user_id):
         markup.add(KeyboardButton("⚙️ Admin Panel"))
     return markup
 
-# ================= मुख्य कमांड्स =================
+# ================= Main Commands =================
 
 @bot.message_handler(commands=['start'])
 def start_cmd(message):
     if not is_admin(message.from_user.id):
-        bot.reply_to(message, "🚫 आप इस बोट को इस्तेमाल करने के लिए ऑथराइज्ड नहीं हैं।")
+        bot.reply_to(message, "🚫 You are not authorized to use this bot.")
         return
-    bot.send_message(message.chat.id, "🤖 Welcome to Master UPI Bot!\nसिस्टम रेडी है।", reply_markup=main_menu(message.from_user.id))
+    bot.send_message(message.chat.id, "🤖 Welcome to Master UPI Bot!\nSystem is ready.", reply_markup=main_menu(message.from_user.id))
 
-# ================= 1. QR जनरेशन फ्लो =================
+# ================= 1. QR Generation Flow =================
 
 @bot.message_handler(func=lambda msg: msg.text == "💸 Generate QR")
 def generate_qr_start(message):
@@ -114,7 +114,7 @@ def generate_qr_start(message):
         InlineKeyboardButton("👛 Only Wallet", callback_data="grp_Wallet"),
         InlineKeyboardButton("🌐 All", callback_data="grp_All")
     )
-    bot.send_message(message.chat.id, "किस ग्रुप से UPI ID लेनी है?", reply_markup=markup)
+    bot.send_message(message.chat.id, "Which group to get the UPI ID from?", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("grp_"))
 def ask_amount(call):
@@ -124,7 +124,7 @@ def ask_amount(call):
     buttons = [InlineKeyboardButton(f"₹{amt}", callback_data=f"amt_{amt}_{group}") for amt in amounts]
     markup.add(*buttons)
     markup.add(InlineKeyboardButton("✍️ Custom Amount", callback_data=f"amt_custom_{group}"))
-    bot.edit_message_text(f"Group: {group}\nअमाउंट सेलेक्ट करें:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+    bot.edit_message_text(f"Group: {group}\nSelect the amount:", call.message.chat.id, call.message.message_id, reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("amt_"))
 def process_amount(call):
@@ -133,7 +133,7 @@ def process_amount(call):
     group = data[2]
     
     if amount == "custom":
-        msg = bot.send_message(call.message.chat.id, "कृपया अमाउंट टाइप करके भेजें (Ex: 1500):")
+        msg = bot.send_message(call.message.chat.id, "Please type and send the amount (Ex: 1500):")
         bot.register_next_step_handler(msg, process_custom_amount, group)
     else:
         create_and_send_qr(call.message, int(amount), group, call.from_user.id)
@@ -143,12 +143,12 @@ def process_custom_amount(message, group):
         amount = int(message.text)
         create_and_send_qr(message, amount, group, message.from_user.id)
     except ValueError:
-        bot.send_message(message.chat.id, "❌ अमान्य अमाउंट! केवल नंबर दर्ज करें।")
+        bot.send_message(message.chat.id, "❌ Invalid amount! Please enter numbers only.")
 
 def create_and_send_qr(message, amount, group, admin_id):
     upi = get_next_upi(group)
     if not upi:
-        bot.send_message(message.chat.id, f"❌ {group} ग्रुप में कोई एक्टिव UPI ID उपलब्ध नहीं है!")
+        bot.send_message(message.chat.id, f"❌ No active UPI ID available in the {group} group!")
         return
         
     tx_id = "TXN" + str(uuid.uuid4().hex)[:10].upper()
@@ -238,7 +238,7 @@ def handle_tx_action(call):
         bot.delete_message(call.message.chat.id, call.message.message_id)
         create_and_send_qr(call.message, tx['amount'], tx['group'], call.from_user.id)
 
-# ================= 2. स्टेटस और एनालिटिक्स (Dashboards) =================
+# ================= 2. Status & Analytics (Dashboards) =================
 
 @bot.message_handler(func=lambda msg: msg.text == "📊 Status/Stats")
 def show_stats_menu(message):
@@ -408,7 +408,7 @@ def process_owner_stats(call):
 
     bot.edit_message_text(stats_msg, call.message.chat.id, call.message.message_id, parse_mode="Markdown")
 
-# ================= 3. एडमिन पैनल & UPI Management =================
+# ================= 3. Admin Panel & UPI Management =================
 
 @bot.message_handler(func=lambda msg: msg.text == "⚙️ Admin Panel")
 def admin_panel(message):
@@ -418,14 +418,14 @@ def admin_panel(message):
     markup.add("👥 Manage Admins", "💰 Partner Balances")
     markup.add("⚙️ QR Setting (TXN ID)", "🗑 Remove Manual TXN")
     markup.add("⬅️ Back to Main")
-    bot.send_message(message.chat.id, "⚙️ Admin Panel में आपका स्वागत है।", reply_markup=markup)
+    bot.send_message(message.chat.id, "⚙️ Welcome to the Admin Panel.", reply_markup=markup)
 
 @bot.message_handler(func=lambda msg: msg.text == "📋 List & Manage UPIs")
 def list_manage_upis(message):
     if message.from_user.id != OWNER_ID: return
     upis = list(upi_col.find())
     if not upis:
-        bot.send_message(message.chat.id, "❌ कोई भी UPI ID डेटाबेस में नहीं मिली।")
+        bot.send_message(message.chat.id, "❌ No UPI ID found in the database.")
         return
         
     markup = InlineKeyboardMarkup(row_width=1)
@@ -437,7 +437,7 @@ def list_manage_upis(message):
         btn_text = f"{u['name']} | {u['group']} | {status} | {u['upi_id']}"
         markup.add(InlineKeyboardButton(btn_text, callback_data=f"viewupi_{str(u['_id'])}"))
         
-    bot.send_message(message.chat.id, "📋 **मौजूदा UPI IDs की लिस्ट:**\nहटाने या डिटेल्स देखने के लिए किसी पर क्लिक करें:", reply_markup=markup, parse_mode="Markdown")
+    bot.send_message(message.chat.id, "📋 **List of existing UPI IDs:**\nClick on one to view details or remove it:", reply_markup=markup, parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("viewupi_"))
 def view_upi_options(call):
@@ -445,7 +445,7 @@ def view_upi_options(call):
     upi_id_str = call.data.split("_")[1]
     upi = upi_col.find_one({"_id": ObjectId(upi_id_str)})
     if not upi:
-        return bot.answer_callback_query(call.id, "UPI नहीं मिली!")
+        return bot.answer_callback_query(call.id, "UPI not found!")
         
     now = datetime.now()
     is_waiting = upi.get("waiting_until") and upi["waiting_until"] > now
@@ -476,14 +476,14 @@ def back_to_upi_list_cb(call):
             status = f"⏳ Wait ({u['waiting_until'].strftime('%H:%M')})"
         btn_text = f"{u['name']} | {u['group']} | {status} | {u['upi_id']}"
         markup.add(InlineKeyboardButton(btn_text, callback_data=f"viewupi_{str(u['_id'])}"))
-    bot.edit_message_text("📋 **मौजूदा UPI IDs की लिस्ट:**", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
+    bot.edit_message_text("📋 **List of existing UPI IDs:**", call.message.chat.id, call.message.message_id, reply_markup=markup, parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("unwait_"))
 def unwait_upi_action(call):
     if call.from_user.id != OWNER_ID: return
     upi_id_str = call.data.split("_")[1]
     upi_col.update_one({"_id": ObjectId(upi_id_str)}, {"$unset": {"waiting_until": ""}})
-    bot.answer_callback_query(call.id, "✅ UPI को Active कर दिया गया है!", show_alert=True)
+    bot.answer_callback_query(call.id, "✅ UPI has been made Active!", show_alert=True)
     view_upi_options(call)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("delupi_"))
@@ -491,7 +491,7 @@ def delete_upi_action(call):
     if call.from_user.id != OWNER_ID: return
     upi_id_str = call.data.split("_")[1]
     upi_col.delete_one({"_id": ObjectId(upi_id_str)})
-    bot.answer_callback_query(call.id, "🗑 UPI ID हटा दी गई!", show_alert=True)
+    bot.answer_callback_query(call.id, "🗑 UPI ID removed!", show_alert=True)
     back_to_upi_list_cb(call)
 
 @bot.message_handler(func=lambda msg: msg.text == "⚙️ QR Setting (TXN ID)")
@@ -504,7 +504,7 @@ def toggle_qr_setting(message):
     settings_col.update_one({"_id": "qr_setting"}, {"$set": {"include_txn": new_status}}, upsert=True)
     
     status_text = "🟢 ON" if new_status else "🔴 OFF"
-    bot.send_message(message.chat.id, f"⚙️ **QR Prefilled TXN ID Setting:**\nअब से QR कोड में TXN ID **{status_text}** रहेगी।", parse_mode="Markdown")
+    bot.send_message(message.chat.id, f"⚙️ **QR Prefilled TXN ID Setting:**\nFrom now on, the TXN ID will be **{status_text}** in the QR code.", parse_mode="Markdown")
 
 @bot.message_handler(func=lambda msg: msg.text == "⬅️ Back to Main")
 def back_main(message):
@@ -514,19 +514,19 @@ def back_main(message):
 @bot.message_handler(func=lambda msg: msg.text == "➕ Add UPI")
 def add_upi_start(message):
     if message.from_user.id != OWNER_ID: return
-    msg = bot.send_message(message.chat.id, "UPI ID भेजें (Ex: number@paytm):")
+    msg = bot.send_message(message.chat.id, "Send the UPI ID (Ex: number@paytm):")
     bot.register_next_step_handler(msg, step_upi_name)
 
 def step_upi_name(message):
     upi_id = message.text
-    msg = bot.send_message(message.chat.id, "इस UPI का नाम बताएं:")
+    msg = bot.send_message(message.chat.id, "Enter a name for this UPI:")
     bot.register_next_step_handler(msg, step_upi_group, upi_id)
 
 def step_upi_group(message, upi_id):
     name = message.text
     markup = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     markup.add("Bank", "Wallet")
-    msg = bot.send_message(message.chat.id, "यह बैंक है या वॉलेट?", reply_markup=markup)
+    msg = bot.send_message(message.chat.id, "Is this a Bank or Wallet?", reply_markup=markup)
     bot.register_next_step_handler(msg, save_upi, upi_id, name)
 
 def save_upi(message, upi_id, name):
@@ -538,7 +538,7 @@ def save_upi(message, upi_id, name):
         "last_used": datetime.min,
         "waiting_until": None
     })
-    bot.send_message(message.chat.id, f"✅ UPI ID '{upi_id}' सफलतापूर्वक जुड़ गई!", reply_markup=main_menu(message.from_user.id))
+    bot.send_message(message.chat.id, f"✅ UPI ID '{upi_id}' added successfully!", reply_markup=main_menu(message.from_user.id))
 
 # --- Manage Admins Flow ---
 @bot.message_handler(func=lambda msg: msg.text == "👥 Manage Admins")
@@ -552,32 +552,32 @@ def manage_admins_menu(message):
         markup.add(InlineKeyboardButton(f"👤 {adm['name']}", callback_data=f"mngadm_{adm['user_id']}"))
     markup.add(InlineKeyboardButton("➕ Add New Main Admin", callback_data="add_new_main_admin"))
     
-    bot.send_message(message.chat.id, "👥 **Manage Admins:**\nकिसी भी एडमिन को चुनें या नया बनाएँ:", reply_markup=markup, parse_mode="Markdown")
+    bot.send_message(message.chat.id, "👥 **Manage Admins:**\nSelect an admin or create a new one:", reply_markup=markup, parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: call.data == "add_new_main_admin")
 def add_main_admin_cb(call):
-    msg = bot.send_message(call.message.chat.id, "नए एडमिन की Telegram User ID भेजें:")
+    msg = bot.send_message(call.message.chat.id, "Send the Telegram User ID of the new admin:")
     bot.register_next_step_handler(msg, step_admin_name)
 
 def step_admin_name(message):
     try:
         new_admin_id = int(message.text)
-        msg = bot.send_message(message.chat.id, "नए एडमिन का नाम बताएं:")
+        msg = bot.send_message(message.chat.id, "Enter the name of the new admin:")
         bot.register_next_step_handler(msg, step_admin_type, new_admin_id)
     except ValueError:
-        bot.send_message(message.chat.id, "❌ अमान्य आईडी!")
+        bot.send_message(message.chat.id, "❌ Invalid ID!")
 
 def step_admin_type(message, new_admin_id):
     name = message.text
     markup = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
     markup.add("Regular (No Share)", "Sharing (30% Admin)")
-    msg = bot.send_message(message.chat.id, "यह एडमिन किस प्रकार का है?", reply_markup=markup)
+    msg = bot.send_message(message.chat.id, "What type of admin is this?", reply_markup=markup)
     bot.register_next_step_handler(msg, save_admin, new_admin_id, name)
 
 def save_admin(message, new_admin_id, name):
     is_sharing = "Sharing" in message.text
     if admins_col.find_one({"user_id": new_admin_id}):
-        bot.send_message(message.chat.id, "❌ यह एडमिन पहले से मौजूद है!", reply_markup=main_menu(message.from_user.id))
+        bot.send_message(message.chat.id, "❌ This admin already exists!", reply_markup=main_menu(message.from_user.id))
     else:
         admins_col.insert_one({
             "user_id": new_admin_id, "name": name, "is_sharing": is_sharing,
@@ -604,23 +604,23 @@ def admin_details_manage(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("linknew_"))
 def ask_sub_id(call):
     adm_id = int(call.data.split("_")[1])
-    msg = bot.send_message(call.message.chat.id, "लिंक करने के लिए नई Telegram User ID भेजें:")
+    msg = bot.send_message(call.message.chat.id, "Send the new Telegram User ID to link:")
     bot.register_next_step_handler(msg, save_linked_subid, adm_id)
 
 def save_linked_subid(message, primary_id):
     try:
         new_id = int(message.text)
         if admins_col.find_one({"user_id": new_id}):
-            return bot.send_message(message.chat.id, "❌ यह ID सिस्टम में पहले से मौजूद है।")
+            return bot.send_message(message.chat.id, "❌ This ID already exists in the system.")
         p_admin = admins_col.find_one({"user_id": primary_id})
         admins_col.insert_one({
             "user_id": new_id, "name": p_admin["name"] + " (Sub)",
             "is_sharing": p_admin["is_sharing"], "primary_id": primary_id,
             "last_cleared": p_admin["last_cleared"]
         })
-        bot.send_message(message.chat.id, f"✅ ID {new_id} सफलतापूर्वक {p_admin['name']} से लिंक हो गई!")
+        bot.send_message(message.chat.id, f"✅ ID {new_id} successfully linked to {p_admin['name']}!")
     except ValueError:
-        bot.send_message(message.chat.id, "❌ अमान्य आईडी।")
+        bot.send_message(message.chat.id, "❌ Invalid ID.")
 
 # --- Partner Balance & Advance System ---
 @bot.message_handler(func=lambda msg: msg.text == "💰 Partner Balances")
@@ -642,7 +642,7 @@ def partner_balances(message):
         
         markup.add(InlineKeyboardButton(f"👤 {partner['name']} | Uncleared: ₹{uncleared_total}", callback_data=f"partner_{partner_id}"))
         
-    bot.send_message(message.chat.id, "👥 **पार्टनर बैलेंस मैनेज करें:**", reply_markup=markup, parse_mode="Markdown")
+    bot.send_message(message.chat.id, "👥 **Manage Partner Balances:**", reply_markup=markup, parse_mode="Markdown")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("partner_"))
 def partner_details(call):
@@ -676,7 +676,7 @@ def partner_details(call):
 def give_advance_start(call):
     if call.from_user.id != OWNER_ID: return
     partner_id = int(call.data.split("_")[1])
-    msg = bot.send_message(call.message.chat.id, "अमाउंट लिखें (ऐड करने के लिए '2000' लिखें, घटाने के लिए '-500' लिखें):")
+    msg = bot.send_message(call.message.chat.id, "Enter the amount (type '2000' to add, '-500' to deduct):")
     bot.register_next_step_handler(msg, process_give_advance, partner_id)
     
 def process_give_advance(message, partner_id):
@@ -697,7 +697,7 @@ def process_give_advance(message, partner_id):
         new_pending = (uncleared_total * 0.30) - new_advance
         
         admins_col.update_one({"user_id": partner_id}, {"$set": {"advance_received": new_advance}})
-        bot.send_message(message.chat.id, f"✅ एडवांस अपडेट हो गया!")
+        bot.send_message(message.chat.id, f"✅ Advance updated!")
         
         notify_msg = (
             f"🔔 **Advance Balance Update**\n\n"
@@ -713,7 +713,7 @@ def process_give_advance(message, partner_id):
             pass
             
     except ValueError:
-        bot.send_message(message.chat.id, "❌ अमान्य अमाउंट।")
+        bot.send_message(message.chat.id, "❌ Invalid amount.")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("clearbal_"))
 def clear_partner_balance(call):
@@ -726,23 +726,23 @@ def clear_partner_balance(call):
         {"user_id": partner_id}, 
         {"$set": {"last_cleared": datetime.now(), "last_claimed_amount": net_paid, "advance_received": 0}}
     )
-    bot.answer_callback_query(call.id, "✅ बैलेंस सफलतापूर्वक क्लियर कर दिया गया ডান!", show_alert=True)
+    bot.answer_callback_query(call.id, "✅ Balance cleared successfully!", show_alert=True)
     bot.delete_message(call.message.chat.id, call.message.message_id)
 
 # --- Remove Manual Transaction ---
 @bot.message_handler(func=lambda msg: msg.text == "🗑 Remove Manual TXN")
 def remove_txn_start(message):
     if message.from_user.id != OWNER_ID: return
-    msg = bot.send_message(message.chat.id, "जिस पेमेंट को हटाना है उसकी TXN ID भेजें:")
+    msg = bot.send_message(message.chat.id, "Send the TXN ID of the payment you want to remove:")
     bot.register_next_step_handler(msg, delete_txn)
 
 def delete_txn(message):
     tx_id = message.text
     result = tx_col.delete_one({"tx_id": tx_id})
     if result.deleted_count > 0:
-        bot.send_message(message.chat.id, f"✅ TXN {tx_id} डिलीट कर दिया गया!")
+        bot.send_message(message.chat.id, f"✅ TXN {tx_id} deleted!")
     else:
-        bot.send_message(message.chat.id, "❌ यह TXN ID नहीं मिली।")
+        bot.send_message(message.chat.id, "❌ This TXN ID was not found.")
 
 # ================= 4. My Saved QRs =================
 @bot.message_handler(func=lambda msg: msg.text == "🖼 My Saved QRs")
@@ -757,32 +757,32 @@ def my_qrs_menu(message):
 
 @bot.callback_query_handler(func=lambda call: call.data == "saved_add")
 def saved_add_step1(call):
-    msg = bot.send_message(call.message.chat.id, "📸 कृपया QR कोड की Photo भेजें:")
+    msg = bot.send_message(call.message.chat.id, "📸 Please send the Photo of the QR code:")
     bot.register_next_step_handler(msg, saved_add_step2)
 
 def saved_add_step2(message):
-    if not message.photo: return bot.send_message(message.chat.id, "❌ आपने फोटो नहीं भेजी।")
+    if not message.photo: return bot.send_message(message.chat.id, "❌ You did not send a photo.")
     photo_id = message.photo[-1].file_id
-    msg = bot.send_message(message.chat.id, "📝 इस QR को किस नाम से सेव करना है?")
+    msg = bot.send_message(message.chat.id, "📝 Under what name should this QR be saved?")
     bot.register_next_step_handler(msg, saved_add_step3, photo_id)
 
 def saved_add_step3(message, photo_id):
     name = message.text
-    msg = bot.send_message(message.chat.id, "🏦 इस QR की UPI ID भी भेजें:")
+    msg = bot.send_message(message.chat.id, "🏦 Send the UPI ID for this QR as well:")
     bot.register_next_step_handler(msg, saved_add_final, photo_id, name)
 
 def saved_add_final(message, photo_id, name):
     saved_qrs_col.insert_one({"admin_id": message.from_user.id, "photo_id": photo_id, "name": name, "upi_id": message.text})
-    bot.send_message(message.chat.id, f"✅ QR '{name}' सफलतापूर्वक सेव हो गया!")
+    bot.send_message(message.chat.id, f"✅ QR '{name}' saved successfully!")
 
 @bot.callback_query_handler(func=lambda call: call.data == "saved_list")
 def saved_list_show(call):
     qrs = list(saved_qrs_col.find({"admin_id": call.from_user.id}))
-    if not qrs: return bot.answer_callback_query(call.id, "❌ कोई सेव्ड QR नहीं मिला!", show_alert=True)
+    if not qrs: return bot.answer_callback_query(call.id, "❌ No saved QR found!", show_alert=True)
     markup = InlineKeyboardMarkup(row_width=2)
     buttons = [InlineKeyboardButton(qr['name'], callback_data=f"show_qr_{str(qr['_id'])}") for qr in qrs]
     markup.add(*buttons)
-    bot.edit_message_text("👇 अपने सेव्ड QR चुनें:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+    bot.edit_message_text("👇 Select your saved QR:", call.message.chat.id, call.message.message_id, reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("show_qr_"))
 def saved_show_specific(call):
@@ -793,24 +793,24 @@ def saved_show_specific(call):
     else:
         bot.answer_callback_query(call.id, "QR not found!")
 
-# ================= मेमोरी और स्टार्टअप चेक =================
+# ================= Memory & Startup Check =================
 def check_memory():
-    print("\n🔄 MongoDB से पुरानी मेमोरी फेच की जा रही है...")
+    print("\n🔄 Fetching old memory from MongoDB...")
     try:
         upi_count = upi_col.count_documents({})
         admin_count = admins_col.count_documents({})
         tx_count = tx_col.count_documents({})
         qr_count = saved_qrs_col.count_documents({})
         
-        print("✅ सारा डेटा सफलतापूर्वक लोड हो गया!")
-        print(f"📊 डेटाबेस स्टेट्स:")
-        print(f"  - 🏦 सेव्ड UPIs: {upi_count}")
-        print(f"  - 👥 कुल Admins: {admin_count}")
-        print(f"  - 💸 कुल Transactions: {tx_count}")
-        print(f"  - 🖼 सेव्ड QRs: {qr_count}")
+        print("✅ All data loaded successfully!")
+        print(f"📊 Database Stats:")
+        print(f"  - 🏦 Saved UPIs: {upi_count}")
+        print(f"  - 👥 Total Admins: {admin_count}")
+        print(f"  - 💸 Total Transactions: {tx_count}")
+        print(f"  - 🖼 Saved QRs: {qr_count}")
         print("\n🚀 Bot is running securely on the new VPS with memory loaded...")
     except Exception as e:
-        print(f"❌ मेमोरी लोड करने में एरर (MongoDB Connection Issue): {e}")
+        print(f"❌ Error loading memory (MongoDB Connection Issue): {e}")
 
 # ================= BOT RUNNER =================
 if __name__ == "__main__":

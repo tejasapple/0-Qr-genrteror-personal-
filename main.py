@@ -9,7 +9,7 @@ from PIL import Image
 from bson.objectid import ObjectId
 
 # ================= कॉन्फ़िगरेशन =================
-BOT_TOKEN = "8847025807:AAFPlpDrpAlQp-Fi5jBPIZlMjmcmRPDIB04"
+BOT_TOKEN = "8966888657:AAEl5dGNrPk_QzPz8r4XZat01mIfJMNVC7k"
 MONGO_URI = "mongodb+srv://Tejas7xx:mrxtejas7@cluster0.akhlgjf.mongodb.net/?appName=Cluster0"
 OWNER_ID = 7121137252
 

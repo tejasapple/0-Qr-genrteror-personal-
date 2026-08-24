@@ -726,7 +726,7 @@ def clear_partner_balance(call):
         {"user_id": partner_id}, 
         {"$set": {"last_cleared": datetime.now(), "last_claimed_amount": net_paid, "advance_received": 0}}
     )
-    bot.answer_callback_query(call.id, "✅ बैलेंस सफलतापूर्वक क्लियर कर दिया गया है!", show_alert=True)
+    bot.answer_callback_query(call.id, "✅ बैलेंस सफलतापूर्वक क्लियर कर दिया गया ডান!", show_alert=True)
     bot.delete_message(call.message.chat.id, call.message.message_id)
 
 # --- Remove Manual Transaction ---
@@ -793,6 +793,26 @@ def saved_show_specific(call):
     else:
         bot.answer_callback_query(call.id, "QR not found!")
 
+# ================= मेमोरी और स्टार्टअप चेक =================
+def check_memory():
+    print("\n🔄 MongoDB से पुरानी मेमोरी फेच की जा रही है...")
+    try:
+        upi_count = upi_col.count_documents({})
+        admin_count = admins_col.count_documents({})
+        tx_count = tx_col.count_documents({})
+        qr_count = saved_qrs_col.count_documents({})
+        
+        print("✅ सारा डेटा सफलतापूर्वक लोड हो गया!")
+        print(f"📊 डेटाबेस स्टेट्स:")
+        print(f"  - 🏦 सेव्ड UPIs: {upi_count}")
+        print(f"  - 👥 कुल Admins: {admin_count}")
+        print(f"  - 💸 कुल Transactions: {tx_count}")
+        print(f"  - 🖼 सेव्ड QRs: {qr_count}")
+        print("\n🚀 Bot is running securely on the new VPS with memory loaded...")
+    except Exception as e:
+        print(f"❌ मेमोरी लोड करने में एरर (MongoDB Connection Issue): {e}")
+
 # ================= BOT RUNNER =================
-print("Bot is running with Advanced Stats & Rotation Logic...")
-bot.infinity_polling()
+if __name__ == "__main__":
+    check_memory()
+    bot.infinity_polling()
